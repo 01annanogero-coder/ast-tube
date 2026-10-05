@@ -1,0 +1,14 @@
+# The Flutter app folder has its own .gitignore too (app/, app/android/).
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
+# Release files go to GitHub Releases, not into the repository.
+*.apk
+*.aab
+
+app/android/build/
+
+# Reference image we do not hold the rights to (kept locally only).
+docs/design/youtube-wireframe.jpg
