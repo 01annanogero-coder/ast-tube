@@ -449,3 +449,33 @@ body[data-watch="full"] .bottom-nav { visibility: hidden; }
 /* Toast with Undo */
 .toast-undo { display: flex; align-items: center; gap: 14px; }
 .toast-undo button { color: #6B3BE0; font-weight: 700; text-transform: uppercase; font-size: 13px; letter-spacing: .4px; }
+
+/* Channel posts (text, photos, polls) */
+.post { padding: 4px 0 6px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.post-head { display: flex; align-items: center; padding: 10px 6px 6px var(--pad); }
+.post-author { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.post-author b { display: block; font-size: 14px; }
+.post-author em { display: block; font-style: normal; font-size: 12px; color: var(--muted); }
+.post-text { padding: 2px var(--pad) 10px; font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.post-text.open { display: block; }
+.post-text a { color: var(--link); }
+.post-images { position: relative; margin: 0 var(--pad); border-radius: var(--radius); overflow: hidden; background: var(--surface-2); }
+.post-strip { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.post-strip::-webkit-scrollbar { display: none; }
+.post-strip img { flex: none; width: 100%; max-height: 70vh; object-fit: contain; scroll-snap-align: start; background: #000; }
+.post-count { position: absolute; top: 10px; right: 10px; padding: 3px 9px; border-radius: 12px; background: rgba(8, 7, 14, .78); font-size: 12px; font-weight: 600; }
+.post-poll { margin: 0 var(--pad); display: flex; flex-direction: column; gap: 8px; }
+.poll-choice { padding: 11px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); font-weight: 500; }
+.post-poll p { color: var(--muted); font-size: 12.5px; }
+.post .vrow { margin-top: 8px; }
+.post-foot { display: flex; gap: 8px; padding: 10px var(--pad) 4px; }
+
+/* Full-screen photo viewer */
+.img-viewer { position: fixed; inset: 0; z-index: 70; background: #000; opacity: 0; transition: opacity .15s; }
+.img-viewer.open { opacity: 1; }
+.img-strip { display: flex; height: 100%; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.img-strip::-webkit-scrollbar { display: none; }
+.img-page { flex: none; width: 100%; height: 100%; display: grid; place-items: center; scroll-snap-align: start; }
+.img-page img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.img-close { position: absolute; top: 8px; left: 8px; background: rgba(0, 0, 0, .5); }
+.img-count { position: absolute; top: 18px; right: 16px; font-size: 14px; font-weight: 600; text-shadow: 0 1px 3px #000; }

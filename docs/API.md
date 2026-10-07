@@ -166,6 +166,12 @@ calls `GET /api/video/<id>` and uses its `hls`/`sources` like any video.
 - `GET /api/offline/shorts` → saved Shorts as ShortItems. `POST /api/offline/shorts` `{ items: [ShortItem] }` → save these. `DELETE /api/offline/shorts` → clear.
 - Saved files are served from `/offline/<id>/...` and `/cache/shorts/<id>/...` (Range supported). `/api/video/<id>` returns these local URLs whenever a saved copy exists, online or not.
 
+### Posts
+- `GET /api/posts/<channelId>?next=` → `{ items: [PostItem], next }`, a channel's Posts tab.
+  PostItem: `{ type: "post", id, channel, channelId, avatar, text, published, likes, comments, images: [url], more, detail, poll: { choices, votes } | null, video: VideoItem | null }`. Photos are uncropped (up to 1080 px). `more: true` means a multi-photo post whose other photos come from:
+- `GET /api/postimages?p=<detail>` → `[url, ...]` all photos of that post.
+- Home mixes in up to 2 recent posts (hours/days/weeks old) from each of the 3 channels you watch most.
+
 ### Recommendations
 - `GET /api/blocklist` → `{ videos: [id], channels: [{ id, name }] }`. `POST {"video": {"id"}}` or `{"channel": {"id", "name"}}` adds; `DELETE ?video=<id>` / `?channel=<id>` removes one, no query clears all. Blocked items never appear in Home, chips, Up next, related videos or Shorts (search is not filtered).
 - `GET /api/taste` → what Home is currently based on: `{ seeds, topics, channels, shortChannels }` (read-only, for checking).

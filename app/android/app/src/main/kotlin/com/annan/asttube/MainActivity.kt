@@ -29,6 +29,8 @@ class MainActivity : FlutterActivity() {
                 "playlist" -> { { yt.playlist(arg("id"), next()) } }
                 "mix" -> { { yt.mix(arg("id"), arg("seed"), next()) } }
                 "related" -> { { yt.related(arg("id"), next()) } }
+                "posts" -> { { yt.posts(arg("id"), next()) } }
+                "postImages" -> { { yt.postImages(arg("params")) } }
                 "shorts" -> { { yt.shorts(arg("q"), next()) } }
                 else -> null
             }

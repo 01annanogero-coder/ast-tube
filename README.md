@@ -46,7 +46,8 @@ you to allow AST Tube to install apps.
 | **Background play** | Keeps playing when you leave the app or lock the screen, with a media notification and lock-screen controls (previous, play/pause, next). Can be turned off in Settings. |
 | **Shorts** | Full-screen vertical feed: swipe up for the next one. The next Shorts buffer ahead of time, so they start at once. Topics come from the channels you watch. |
 | **Search** | Suggestions as you type, filters for videos, channels and playlists. |
-| **Channels and playlists** | Videos, Shorts, Live and Playlists tabs. |
+| **Channels and playlists** | Videos, Shorts, Live, Playlists and **Posts** tabs. |
+| **Posts** | Channel posts: text, photos (swipe through multi-photo posts, tap for full screen), polls and shared videos. Recent posts from channels you watch also appear on Home. Read-only; post comments open on YouTube. |
 | **Comments** | Read-only, with clickable timestamps. |
 | **Downloads** | "Download" under any video (or in its ⋮ menu): pick 240p–1080p, each with its size. Saved inside the app on this phone, never in your Downloads folder. Plays without internet, including in the background, with captions. Settings › Downloads lists them with progress. |
 | **Offline Shorts** | On Wi-Fi, AST Tube keeps 50 new Shorts ready (plus the next 10 as you swipe; 3 on mobile data) in a 300 MB cache. Without internet it opens straight to them, new ones first. |

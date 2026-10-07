@@ -76,6 +76,77 @@ function playlistCard(p) {
   return c;
 }
 
+// A channel post: text, photos (one, or a swipeable set with a "1/10" counter), a poll or a
+// shared video. Read-only; post comments are only on YouTube (signed in), so the count links there.
+function postCard(p) {
+  let imgs = p.images || [];
+  const url = `https://www.youtube.com/post/${p.id}`;
+  const c = el(`<article class="post" data-id="${esc(p.id)}" data-channel="${esc(p.channelId || '')}">
+    <div class="post-head">
+      <a class="post-author" ${p.channelId ? `href="#/channel/${esc(p.channelId)}"` : ''}>${avatar(p.avatar, p.channel, 36)}
+        <span><b>${esc(p.channel)}</b><em>${esc(p.published || '')}</em></span></a>
+      <button class="icon-btn vcard-more" aria-label="More">${icon('more', 20)}</button>
+    </div>
+    ${p.text ? `<p class="post-text">${linkify(p.text)}</p>` : ''}
+    ${imgs.length ? `<div class="post-images${imgs.length > 1 ? ' multi' : ''}"><div class="post-strip">${imgs.map((u, i) => `<img src="${esc(u)}" data-i="${i}" loading="lazy" alt="" referrerpolicy="no-referrer">`).join('')}</div>${imgs.length > 1 || p.more ? `<span class="post-count">1/${p.more ? '…' : imgs.length}</span>` : ''}</div>` : ''}
+    ${p.poll ? `<div class="post-poll">${p.poll.choices.map((ch) => `<div class="poll-choice">${esc(ch)}</div>`).join('')}<p>${esc(p.poll.votes)}</p></div>` : ''}
+    <div class="post-foot">
+      <span class="pill small">${icon('thumbUp', 16)} ${esc(p.likes || '0')}</span>
+      <a class="pill small" href="${esc(url)}" target="_blank" rel="noopener">${icon('comment', 16)} ${esc(p.comments || '0')}</a>
+      <button class="pill small post-share">${icon('share', 16)}</button>
+    </div>
+  </article>`);
+  if (p.video) c.querySelector('.post-foot').before(videoRow(p.video));
+  const text = c.querySelector('.post-text');
+  if (text) text.onclick = (e) => { if (!e.target.closest('a')) text.classList.toggle('open'); };
+  const strip = c.querySelector('.post-strip');
+  // A multi-photo post arrives with only its first photo: fetch the rest once it's on screen.
+  if (strip && p.more && p.detail) {
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      io.disconnect();
+      api(`/api/postimages?p=${encodeURIComponent(p.detail)}`).then((all) => {
+        if (!all || all.length <= 1) { const n = c.querySelector('.post-count'); if (n) n.remove(); return; }
+        imgs = all;
+        strip.innerHTML = all.map((u, i) => `<img src="${esc(u)}" data-i="${i}" loading="lazy" alt="" referrerpolicy="no-referrer">`).join('');
+        c.querySelector('.post-images').classList.add('multi');
+        c.querySelector('.post-count').textContent = `1/${all.length}`;
+      }).catch(() => {});
+    }, { rootMargin: '400px' });
+    io.observe(c);
+  }
+  if (strip) {
+    const count = c.querySelector('.post-count');
+    if (count) strip.addEventListener('scroll', () => { if (imgs.length > 1) count.textContent = `${Math.round(strip.scrollLeft / strip.clientWidth) + 1}/${imgs.length}`; }, { passive: true });
+    strip.onclick = (e) => { const im = e.target.closest('img'); if (im) imageViewer(imgs, Number(im.dataset.i)); };
+  }
+  c.querySelector('.post-share').onclick = () => share(p.text ? p.text.slice(0, 80) : p.channel, url);
+  c.querySelector('.vcard-more').onclick = () => menuSheet([
+    { icon: 'external', label: 'Open on YouTube', run: () => window.open(url, '_blank') },
+    { icon: 'link', label: 'Copy link', run: () => copy(url) },
+    ...(p.channelId ? [{ icon: 'trash', label: `Don't recommend ${p.channel || 'this channel'}`, run: () => notInterested({ channel: { channelId: p.channelId, channel: p.channel } }) }] : []),
+  ]);
+  return c;
+}
+
+// Full-screen photos: swipe between them; Back or ✕ closes.
+function imageViewer(imgs, start) {
+  const v = el(`<div class="img-viewer">
+    <div class="img-strip">${imgs.map((u) => `<div class="img-page"><img src="${esc(u.replace(/=s\d+-/, '=s2048-'))}" alt="" referrerpolicy="no-referrer"></div>`).join('')}</div>
+    <button class="icon-btn img-close" aria-label="Close">${icon('close')}</button>
+    ${imgs.length > 1 ? `<span class="img-count">${start + 1}/${imgs.length}</span>` : ''}
+  </div>`);
+  document.body.appendChild(v);
+  const strip = v.querySelector('.img-strip');
+  requestAnimationFrame(() => { strip.scrollLeft = start * strip.clientWidth; v.classList.add('open'); });
+  const count = v.querySelector('.img-count');
+  if (count) strip.addEventListener('scroll', () => { count.textContent = `${Math.round(strip.scrollLeft / strip.clientWidth) + 1}/${imgs.length}`; }, { passive: true });
+  // Registered like a sheet, so Android Back closes it.
+  const api = { el: v, close() { const i = sheets.indexOf(api); if (i >= 0) sheets.splice(i, 1); v.remove(); } };
+  sheets.push(api);
+  v.querySelector('.img-close').onclick = api.close;
+}
+
 // YouTube "Mix": an endless playlist around a song. Stacked look, like YouTube's.
 const mixHref = (m) => `#/watch/${encodeURIComponent(m.seed)}?list=${encodeURIComponent(m.id)}`;
 function mixCard(m) {
@@ -96,6 +167,7 @@ function mixCard(m) {
 
 function anyCard(it) {
   if (it.type === 'video') return videoCard(it);
+  if (it.type === 'post') return postCard(it);
   if (it.type === 'mix') return mixCard(it);
   if (it.type === 'channel') return channelCard(it);
   if (it.type === 'playlist') return playlistCard(it);
@@ -136,7 +208,7 @@ function itemMenu(v, extra = {}) {
 async function notInterested({ video, channel }) {
   const body = video ? { video: { id: video.id } } : { channel: { id: channel.channelId, name: channel.channel || '' } };
   try { await post('/api/blocklist', body); } catch (e) { toast(e.message); return; }
-  const sel = video ? `.vcard[data-id="${CSS.escape(video.id)}"]` : `.vcard[data-channel="${CSS.escape(channel.channelId)}"]`;
+  const sel = video ? `.vcard[data-id="${CSS.escape(video.id)}"]` : `.vcard[data-channel="${CSS.escape(channel.channelId)}"], .post[data-channel="${CSS.escape(channel.channelId)}"]`;
   const cards = [...document.querySelectorAll(sel)];
   cards.forEach((c) => c.classList.add('hidden'));
   undoToast(video ? 'Video hidden. We\x27ll show fewer like it.' : `You won't see ${channel.channel || 'this channel'} in recommendations.`, async () => {
@@ -367,7 +439,7 @@ function commentsSheet(id, player) {
 
 // ================================================================ channel
 
-const TAB_LABELS = { videos: 'Videos', shorts: 'Shorts', live: 'Live', playlists: 'Playlists' };
+const TAB_LABELS = { videos: 'Videos', shorts: 'Shorts', live: 'Live', playlists: 'Playlists', posts: 'Posts' };
 
 function channelScreen(screen, { id, tab = 'videos' }) {
   screen.innerHTML = `
@@ -380,7 +452,14 @@ function channelScreen(screen, { id, tab = 'videos' }) {
     <div class="channel-list"></div>`;
   const head = screen.querySelector('.channel-head');
   const list = screen.querySelector('.channel-list');
-  return pagedList(screen, list, (next) => api(`/api/channel/${encodeURIComponent(id)}?tab=${tab}${next ? `&next=${encodeURIComponent(next)}` : ''}`), (it) => {
+  // Posts come from their own endpoint; the header still comes from the channel.
+  const load = (next) => {
+    if (tab !== 'posts') return api(`/api/channel/${encodeURIComponent(id)}?tab=${tab}${next ? `&next=${encodeURIComponent(next)}` : ''}`);
+    if (next) return api(`/api/posts/${encodeURIComponent(id)}?next=${encodeURIComponent(next)}`);
+    return Promise.all([api(`/api/channel/${encodeURIComponent(id)}?tab=videos`), api(`/api/posts/${encodeURIComponent(id)}`)])
+      .then(([c, p]) => ({ ...c, tab: 'posts', items: p.items, next: p.next }));
+  };
+  return pagedList(screen, list, load, (it) => {
     if (it.type === 'short') return shortCard(it);
     return anyCard(it);
   }, {
@@ -396,7 +475,7 @@ function channelScreen(screen, { id, tab = 'videos' }) {
           </div>
         </div>
         ${c.description ? `<p class="ch-desc">${esc(c.description)}</p>` : ''}
-        <nav class="tabs">${(c.tabs || []).map((t) => `<a class="tab${t === c.tab ? ' active' : ''}" href="#/channel/${esc(id)}/${t}">${TAB_LABELS[t] || t}</a>`).join('')}</nav>`;
+        <nav class="tabs">${[...(c.tabs || []), 'posts'].map((t) => `<a class="tab${t === c.tab ? ' active' : ''}" href="#/channel/${esc(id)}/${t}">${TAB_LABELS[t] || t}</a>`).join('')}</nav>`;
       const d = head.querySelector('.ch-desc');
       if (d) d.onclick = () => d.classList.toggle('open');
       list.className = `channel-list tab-${c.tab}`;

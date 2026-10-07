@@ -111,7 +111,7 @@ class LocalServer {
       }
       // No internet: answer at once instead of waiting for YouTube to time out.
       // (Videos still work when they're saved; Shorts fall back to the saved ones.)
-      if (!online && const {'home', 'feed', 'search', 'suggest', 'comments', 'channel', 'playlist', 'related', 'mix'}.contains(parts[0])) {
+      if (!online && const {'home', 'feed', 'search', 'suggest', 'comments', 'channel', 'playlist', 'related', 'mix', 'posts', 'postimages'}.contains(parts[0])) {
         return _json(res, {'error': "You're offline", 'offline': true}, 503);
       }
       if (!online && parts[0] == 'video' && await _offline.localDetails(parts[1]) == null) {
@@ -151,6 +151,12 @@ class LocalServer {
           return _json(res, await _cached('mix|${parts[1]}|$seed|$next', const Duration(minutes: 30), () => _call('mix', {'id': parts[1], 'seed': seed, 'next': next})));
         case 'offline':
           return await _offlineRoute(req, parts.length > 1 ? parts[1] : null, parts.length > 2 ? parts[2] : null);
+        case 'posts':
+          return _json(res, await _cached('posts|${parts[1]}|$next', const Duration(minutes: 30), () => _call('posts', {'id': parts[1], 'next': next})));
+        case 'postimages':
+          // All photos of a multi-photo post (?p= its "detail" params).
+          final params = p['p'] ?? '';
+          return _json(res, await _cached('postimages|$params', const Duration(hours: 1), () => _call('postImages', {'params': params})));
         case 'related':
           return _json(res, await _related(parts[1], next));
         case 'taste':
@@ -535,12 +541,41 @@ class LocalServer {
       }
     }
 
-    // A Mix after the 2nd video, then one every 6.
+    // Posts (text, photos, polls) from the channels you follow most closely, like YouTube's
+    // Home: up to 2 recent ones per channel, from the 3 strongest channels.
+    final postChannels = <String>[
+      ...taste.channels.map((c) => c.id),
+      ...taste.seeds.map((s) => '${s['channelId'] ?? ''}'),
+    ].where((id) => id.startsWith('UC')).toSet().take(3).toList();
+    final postLists = await Future.wait(postChannels.map((id) async {
+      try {
+        final r = await _cached('posts|$id|null', const Duration(minutes: 30), () => _call('posts', {'id': id, 'next': null})) as Map;
+        // Only recent posts on Home (hours, days or weeks old); older ones stay in the channel's Posts tab.
+        final recent = RegExp(r'(second|minute|hour|day|week)s? ago', caseSensitive: false);
+        return (r['items'] as List).where((p) => recent.hasMatch('${p['published'] ?? ''}')).take(2).toList();
+      } catch (_) {
+        return <dynamic>[];
+      }
+    }));
+    final posts = _blocked.filter(_roundRobinLists(postLists));
+
+    // A Mix after the 2nd video, then one every 6; a post after the 5th, then one every 8.
     final out = <dynamic>[];
-    var m = 0;
+    var m = 0, p = 0;
     for (var i = 0; i < videos.length; i++) {
       out.add(videos[i]);
       if ((i == 1 || (i > 1 && (i - 1) % 6 == 0)) && m < mixes.length) out.add(mixes[m++]);
+      if ((i == 4 || (i > 4 && (i - 4) % 8 == 0)) && p < posts.length) out.add(posts[p++]);
+    }
+    return out;
+  }
+
+  static List<dynamic> _roundRobinLists(List<List<dynamic>> lists) {
+    final out = <dynamic>[];
+    for (var i = 0; i < lists.fold<int>(0, (a, l) => max(a, l.length)); i++) {
+      for (final l in lists) {
+        if (i < l.length) out.add(l[i]);
+      }
     }
     return out;
   }

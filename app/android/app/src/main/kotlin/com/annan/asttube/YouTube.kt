@@ -293,6 +293,127 @@ class YouTube {
         return JSONObject().put("items", arr).put("next", token ?: JSONObject.NULL)
     }
 
+    // ------------------------------------------------------------------ posts
+
+    /**
+     * A channel's Posts tab (text, images, polls, shared videos), page by page. NewPipe
+     * doesn't read posts, so this asks YouTube's browse endpoint for the tab directly.
+     */
+    fun posts(channelId: String, next: String?): JSONObject {
+        next?.let { return more(it) }
+        // Posts are looked up by the channel's UC id; @handles are resolved first.
+        val id = if (channelId.startsWith("UC")) channelId else ChannelInfo.getInfo(yt, channelUrl(channelId)).id
+        val body = JsonWriter.string(
+            YoutubeParsingHelper.prepareDesktopJsonBuilder(NewPipe.getPreferredLocalization(), NewPipe.getPreferredContentCountry())
+                .value("browseId", id)
+                .value("params", "Egdwb3N0c_IGBAoCSgA%3D") // the "Posts" tab
+                .done())
+        val res = YoutubeParsingHelper.getJsonPostResponse("browse", body.toByteArray(StandardCharsets.UTF_8), NewPipe.getPreferredLocalization())
+        return postPage(res)
+    }
+
+    private fun postPage(root: Any): JSONObject {
+        val arr = JSONArray()
+        var continuation: String? = null
+        walk(root) { key, obj ->
+            when (key) {
+                "postRenderer", "backstagePostRenderer" -> post(obj)?.let { arr.put(it) }
+                "continuationCommand" -> obj.getString("token")?.let { continuation = it }
+            }
+        }
+        val token = continuation?.let { c ->
+            remember {
+                val body = JsonWriter.string(
+                    YoutubeParsingHelper.prepareDesktopJsonBuilder(NewPipe.getPreferredLocalization(), NewPipe.getPreferredContentCountry())
+                        .value("continuation", c)
+                        .done())
+                postPage(YoutubeParsingHelper.getJsonPostResponse("browse", body.toByteArray(StandardCharsets.UTF_8), NewPipe.getPreferredLocalization()))
+            }
+        }
+        return JSONObject().put("items", arr).put("next", token ?: JSONObject.NULL)
+    }
+
+    /** All photos of a multi-photo post, from its own page (params from a post's "detail"). */
+    fun postImages(params: String): JSONArray {
+        val body = JsonWriter.string(
+            YoutubeParsingHelper.prepareDesktopJsonBuilder(NewPipe.getPreferredLocalization(), NewPipe.getPreferredContentCountry())
+                .value("browseId", "FEpost_detail")
+                .value("params", params)
+                .done())
+        val res = YoutubeParsingHelper.getJsonPostResponse("browse", body.toByteArray(StandardCharsets.UTF_8), NewPipe.getPreferredLocalization())
+        var multi: NJsonObject? = null
+        walk(res) { k, v -> if (k == "postMultiImageRenderer" && multi == null) multi = v }
+        return multi?.let { postImageUrls(it) } ?: JSONArray()
+    }
+
+    /** Photo URLs in order, uncropped (YouTube's lists send square crops), at most 1080 px. */
+    private fun postImageUrls(node: NJsonObject): JSONArray {
+        val images = JSONArray()
+        walk(node) { k, v ->
+            if (k == "backstageImageRenderer") {
+                v.getObject("image").getArray("thumbnails").lastOrNull()?.let { (it as NJsonObject).getString("url") }?.let { u ->
+                    val full = if (u.startsWith("//")) "https:$u" else u
+                    images.put(full.replace(Regex("=s\\d+(-c-fcrop64=[^-]*)?-"), "=s1080-"))
+                }
+            }
+        }
+        return images
+    }
+
+    private fun post(p: NJsonObject): JSONObject? {
+        val postId = p.getString("postId") ?: return null
+        fun runs(o: NJsonObject) = o.getArray("runs").joinToString("") { (it as? NJsonObject)?.getString("text") ?: "" }
+            .ifEmpty { o.getString("simpleText") ?: "" }
+        val att = p.getObject("backstageAttachment")
+        // Images: one (backstageImageRenderer) or several (a carousel); keep their order.
+        val images = postImageUrls(att)
+        // In a channel's list a multi-photo post shows only its first photo (with a
+        // "collection" icon); the rest are on the post's own page ([postImages]).
+        var more = false
+        walk(att) { k, v -> if (k == "backstageImageRenderer" && v.getObject("icon").getString("iconType") == "COLLECTIONS") more = true }
+        var detail: String? = null
+        walk(p.getObject("publishedTimeText")) { k, v -> if (k == "browseEndpoint" && v.getString("browseId") == "FEpost_detail") detail = v.getString("params") }
+        val poll = att.getObject("pollRenderer").takeIf { it.isNotEmpty() }?.let { pr ->
+            JSONObject()
+                .put("choices", JSONArray(pr.getArray("choices").mapNotNull { (it as? NJsonObject)?.getObject("text")?.let(::runs) }))
+                .put("votes", runs(pr.getObject("totalVotes")))
+        }
+        // A shared video: enough to show it as a small card that opens the video.
+        val video = att.getObject("videoRenderer").takeIf { it.getString("videoId") != null }?.let { vr ->
+            val vid = vr.getString("videoId")
+            JSONObject()
+                .put("type", "video")
+                .put("id", vid)
+                .put("title", runs(vr.getObject("title")))
+                .put("channel", runs(vr.getObject("ownerText")))
+                .put("thumb", "https://i.ytimg.com/vi/$vid/hqdefault.jpg")
+                .put("duration", seconds(vr.getObject("lengthText").getString("simpleText")))
+                .put("views", -1)
+        }
+        var comments = ""
+        walk(p.getObject("actionButtons")) { k, v -> if (k == "replyButton") comments = comments.ifEmpty { runs(v.getObject("buttonRenderer").getObject("text")) } }
+        val author = p.getObject("authorText")
+        var channelId: String? = null
+        walk(p.getObject("authorEndpoint")) { k, v -> if (k == "browseEndpoint") channelId = channelId ?: v.getString("browseId") }
+        val avatar = p.getObject("authorThumbnail").getArray("thumbnails").lastOrNull()
+            ?.let { (it as NJsonObject).getString("url") }?.let { if (it.startsWith("//")) "https:$it" else it }
+        return JSONObject()
+            .put("type", "post")
+            .put("id", postId)
+            .put("channel", runs(author))
+            .put("channelId", channelId ?: JSONObject.NULL)
+            .put("avatar", avatar ?: JSONObject.NULL)
+            .put("text", runs(p.getObject("contentText")))
+            .put("published", runs(p.getObject("publishedTimeText")))
+            .put("likes", p.getObject("voteCount").getString("simpleText") ?: "")
+            .put("comments", comments)
+            .put("images", images)
+            .put("more", more)
+            .put("detail", detail ?: JSONObject.NULL)
+            .put("poll", poll ?: JSONObject.NULL)
+            .put("video", video ?: JSONObject.NULL)
+    }
+
     // ------------------------------------------------------------------ up next (endless)
 
     /**
