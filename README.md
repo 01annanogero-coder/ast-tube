@@ -87,6 +87,20 @@ adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com
 node dev/cdp.mjs "location.hash"       # run JS inside the app's WebView (debug builds)
 ```
 
+## Publishing a new version
+
+1. Raise the version in `app/pubspec.yaml` (e.g. `1.1.0+2`).
+2. Run `scripts/release.sh --publish` (Git Bash). It builds the APK, signs it, checks the
+   signatures, backs it up and attaches `ASTTube-1.1.0.apk` to the GitHub release `v1.1.0`.
+   Installed apps pick it up through the automatic updater.
+
+**Signing.** Android only installs an update signed with the same key as the installed app.
+Version 1.0.0 was signed with a debug key; later versions use a release key with
+[key rotation](https://source.android.com/docs/security/features/apksigning/v3#key-rotation):
+`release.sh` signs with both, so every existing install keeps updating. Never upload an APK
+that didn't go through `release.sh`. The keys and their passwords are not in this repository
+(`app/android/key.properties` is git-ignored); they are backed up offline.
+
 ## License
 
 GPL-3.0. AST Tube uses NewPipeExtractor, which is GPL-3.0.

@@ -12,3 +12,6 @@ app/android/build/
 
 # Reference image we do not hold the rights to (kept locally only).
 docs/design/youtube-wireframe.jpg
+
+# Signed release APKs from scripts/release.sh
+dist/
