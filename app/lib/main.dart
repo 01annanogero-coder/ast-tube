@@ -66,6 +66,8 @@ class _ShellState extends State<Shell> {
     _net.setMethodCallHandler((call) async {
       if (call.method == 'changed') {
         _server.online = call.arguments == true;
+        _server.metered = await _net.invokeMethod<bool>('metered') ?? true;
+        _server.networkChanged();
         await _web.runJavaScript('window.astNet && window.astNet(${_server.online})');
       }
     });
@@ -94,6 +96,7 @@ class _ShellState extends State<Shell> {
   Future<void> _start() async {
     try {
       _server.online = await _net.invokeMethod<bool>('online') ?? true;
+      _server.metered = await _net.invokeMethod<bool>('metered') ?? true;
       _server.version = await _net.invokeMethod<String>('version') ?? '';
       await _server.start();
     } catch (e) {

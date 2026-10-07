@@ -7,7 +7,7 @@
 function videoCard(v, extra = {}) {
   const badge = v.live ? '<span class="badge live">LIVE</span>' : v.duration > 0 ? `<span class="badge">${duration(v.duration)}</span>` : '';
   const prog = progressBar(v.id, extra.progress);
-  const c = el(`<article class="vcard" data-id="${esc(v.id)}">
+  const c = el(`<article class="vcard" data-id="${esc(v.id)}" data-channel="${esc(v.channelId || '')}">
     <a class="thumb" href="#/watch/${esc(v.id)}"><img src="${esc(v.thumb)}" loading="lazy" alt="" referrerpolicy="no-referrer">${badge}${prog}</a>
     <div class="vcard-info">
       <a class="vcard-av" ${v.channelId ? `href="#/channel/${esc(v.channelId)}"` : ''}>${avatar(v.channelAvatar, v.channel, 36)}</a>
@@ -123,7 +123,26 @@ function itemMenu(v, extra = {}) {
   ];
   if (v.channelId) actions.unshift({ icon: 'compass', label: `Go to ${v.channel || 'channel'}`, run: () => go(`#/channel/${v.channelId}`) });
   if (extra.onRemove) actions.push({ icon: 'trash', label: 'Remove from history', run: extra.onRemove });
+  // Recommendations: hide this video, or everything from its channel (not offered in History).
+  else if (v.type === 'video') {
+    actions.push({ icon: 'close', label: 'Not interested', run: () => notInterested({ video: v }) });
+    if (v.channelId) actions.push({ icon: 'trash', label: `Don't recommend ${v.channel || 'this channel'}`, run: () => notInterested({ channel: v }) });
+  }
   menuSheet(actions);
+}
+
+// Hides a video (or a whole channel) from recommendations, removes it from the screen,
+// and offers Undo. Kept on the phone; editable in Settings.
+async function notInterested({ video, channel }) {
+  const body = video ? { video: { id: video.id } } : { channel: { id: channel.channelId, name: channel.channel || '' } };
+  try { await post('/api/blocklist', body); } catch (e) { toast(e.message); return; }
+  const sel = video ? `.vcard[data-id="${CSS.escape(video.id)}"]` : `.vcard[data-channel="${CSS.escape(channel.channelId)}"]`;
+  const cards = [...document.querySelectorAll(sel)];
+  cards.forEach((c) => c.classList.add('hidden'));
+  undoToast(video ? 'Video hidden. We\x27ll show fewer like it.' : `You won't see ${channel.channel || 'this channel'} in recommendations.`, async () => {
+    await api(`/api/blocklist?${video ? `video=${encodeURIComponent(video.id)}` : `channel=${encodeURIComponent(channel.channelId)}`}`, { method: 'DELETE' }).catch(() => {});
+    cards.forEach((c) => c.classList.remove('hidden'));
+  });
 }
 
 function skeletonCards(n = 3) {
@@ -425,6 +444,7 @@ function settingsScreen(screen) {
     <div class="set-card">
       <a class="set-row" href="#/history">${icon('history')}<div><b>Watch history</b><span class="hist-count">Stored only on this phone</span></div>${icon('chevronRight', 20)}</a>
       <button class="set-row clear-hist">${icon('trash')}<div><b>Clear watch history</b><span>Home goes back to general recommendations</span></div></button>
+      <button class="set-row hidden-recs">${icon('close')}<div><b>Hidden from recommendations</b><span class="hidden-count">Videos and channels you marked "Not interested"</span></div>${icon('chevronRight', 20)}</button>
     </div>
     <h2 class="set-group">Offline</h2>
     <div class="set-card">
@@ -463,13 +483,14 @@ function settingsScreen(screen) {
     refreshCount();
   });
   const refreshCount = () => api('/api/history').then((h) => {
-    screen.querySelector('.hist-count').textContent = h.items.length ? `${h.items.length} video${h.items.length === 1 ? '' : 's'} · stored only on this phone` : 'Stored only on this phone';
+    const nS = h.items.filter((i) => i.type === 'short' || i.short === true).length, nV = h.items.length - nS;
+    screen.querySelector('.hist-count').textContent = h.items.length ? `${nV} video${nV === 1 ? '' : 's'} · ${nS} Short${nS === 1 ? '' : 's'} · stored only on this phone` : 'Stored only on this phone';
   }).catch(() => {});
   refreshCount();
   const refreshOffline = () => api('/api/offline').then((o) => {
     const n = o.downloads.filter((d) => d.status === 'done').length;
     screen.querySelector('.dl-count').textContent = o.downloads.length ? `${n} video${n === 1 ? '' : 's'} · ${size(o.downloadsBytes)}` : 'Videos saved for watching without internet';
-    screen.querySelector('.shorts-count').textContent = `${o.shorts.count} saved · ${size(o.shorts.bytes)} of ${size(o.shorts.limit)} · tap to clear`;
+    screen.querySelector('.shorts-count').textContent = `${o.shorts.fresh} new + ${o.shorts.count - o.shorts.fresh} watched saved · ${size(o.shorts.bytes)} of ${size(o.shorts.limit)} · new ones are added on Wi-Fi · tap to clear`;
   }).catch(() => {});
   screen.querySelector('.clear-shorts').onclick = () => confirmSheet('Delete all saved Shorts? New ones are saved again as you watch.', 'Delete', async () => {
     await api('/api/offline/shorts', { method: 'DELETE' }).catch(() => {});
@@ -477,6 +498,34 @@ function settingsScreen(screen) {
     refreshOffline();
   });
   refreshOffline();
+
+  // "Not interested" list: see it and undo it.
+  const refreshHidden = () => api('/api/blocklist').then((b) => {
+    const n = b.videos.length, c = b.channels.length;
+    screen.querySelector('.hidden-count').textContent = n || c
+      ? `${c} channel${c === 1 ? '' : 's'} · ${n} video${n === 1 ? '' : 's'} hidden`
+      : 'Videos and channels you marked "Not interested"';
+    return b;
+  }).catch(() => ({ videos: [], channels: [] }));
+  screen.querySelector('.hidden-recs').onclick = async () => {
+    const b = await refreshHidden();
+    const sh = openSheet({ title: 'Hidden from recommendations', cls: 'menu-sheet' });
+    if (!b.videos.length && !b.channels.length) {
+      sh.body.innerHTML = '<p class="confirm-text">Nothing hidden. Use ⋮ → "Not interested" on a video to see fewer like it.</p>';
+      return;
+    }
+    for (const ch of b.channels) {
+      const row = el(`<div class="menu-item">${icon('compass', 22)}<span></span><button class="pill small">Show again</button></div>`);
+      row.querySelector('span').textContent = ch.name || ch.id;
+      row.querySelector('button').onclick = async () => { await api(`/api/blocklist?channel=${encodeURIComponent(ch.id)}`, { method: 'DELETE' }).catch(() => {}); row.remove(); refreshHidden(); };
+      sh.body.appendChild(row);
+    }
+    if (b.videos.length) sh.body.appendChild(el(`<p class="dl-note">${b.videos.length} hidden video${b.videos.length === 1 ? '' : 's'}</p>`));
+    const all = el(`<button class="menu-item">${icon('refresh', 22)}<span>Show everything again</span></button>`);
+    all.onclick = async () => { await api('/api/blocklist', { method: 'DELETE' }).catch(() => {}); sh.close(); toast('Recommendations reset'); refreshHidden(); };
+    sh.body.appendChild(all);
+  };
+  refreshHidden();
   return null;
 }
 
@@ -546,31 +595,69 @@ function downloadsScreen(screen) {
 
 // ================================================================ history
 
-function historyScreen(screen) {
+function historyScreen(screen, { tab = 'videos' }) {
+  const isShortItem = (h) => h.type === 'short' || h.short === true;
   screen.innerHTML = `
     <header class="topbar">
       <button class="icon-btn" data-back aria-label="Back">${icon('back')}</button>
       <h1 class="topbar-title">History</h1>
       <span class="grow"></span>
-      <button class="pill small clear-all">${icon('trash', 16)} Clear all</button>
+      <button class="pill small clear-all">${icon('trash', 16)} Clear</button>
     </header>
-    <p class="hist-note">Your watch history stays on this phone. It is used to pick videos for Home.</p>
+    <nav class="tabs hist-tabs">
+      <a class="tab${tab === 'videos' ? ' active' : ''}" data-tab="videos">Videos <span class="tab-count"></span></a>
+      <a class="tab${tab === 'shorts' ? ' active' : ''}" data-tab="shorts">Shorts <span class="tab-count"></span></a>
+    </nav>
+    <p class="hist-note"></p>
     <div class="history"></div>`;
   const box = screen.querySelector('.history');
   const clearBtn = screen.querySelector('.clear-all');
+  const note = screen.querySelector('.hist-note');
+  // Switching tabs replaces the history entry, so Back still leaves the screen.
+  screen.querySelectorAll('.hist-tabs .tab').forEach((t) => {
+    t.onclick = () => location.replace(t.dataset.tab === 'shorts' ? '#/history/shorts' : '#/history');
+  });
 
   async function render() {
     box.innerHTML = '';
     box.appendChild(spinner());
-    let items;
-    try { items = (await api('/api/history')).items; } catch (e) { box.innerHTML = ''; box.appendChild(errorCard(e.message, render)); return; }
+    let data;
+    try { data = await api('/api/history'); } catch (e) { box.innerHTML = ''; box.appendChild(errorCard(e.message, render)); return; }
+    const limits = data.limits || { videos: 120, shorts: 200 };
+    const shorts = data.items.filter(isShortItem);
+    const videos = data.items.filter((h) => !isShortItem(h));
+    const [countV, countS] = screen.querySelectorAll('.tab-count');
+    countV.textContent = `${videos.length}/${limits.videos}`;
+    countS.textContent = `${shorts.length}/${limits.shorts}`;
+    const items = tab === 'shorts' ? shorts : videos;
+    note.textContent = tab === 'shorts'
+      ? `Keeps your last ${limits.shorts} Shorts on this phone. They always play from the start.`
+      : `Keeps your last ${limits.videos} videos on this phone, with where you stopped. Used to pick videos for Home.`;
     box.innerHTML = '';
     clearBtn.classList.toggle('hidden', !items.length);
     if (!items.length) {
-      box.innerHTML = `<div class="empty-state">${icon('history', 48)}<p>Videos you watch will show up here.</p><a class="pill pill-accent" href="#/">Browse Home</a></div>`;
+      box.innerHTML = `<div class="empty-state">${icon(tab === 'shorts' ? 'shorts' : 'history', 48)}<p>${tab === 'shorts' ? 'Shorts' : 'Videos'} you watch will show up here.</p><a class="pill pill-accent" href="${tab === 'shorts' ? '#/shorts' : '#/'}">${tab === 'shorts' ? 'Watch Shorts' : 'Browse Home'}</a></div>`;
       return;
     }
     remember(items);
+    const removeOne = async (h) => {
+      await api(`/api/history/${encodeURIComponent(h.id)}`, { method: 'DELETE' }).catch(() => {});
+      watched.delete(h.id);
+      render();
+    };
+    if (tab === 'shorts') {
+      // A grid of portrait cards, newest first; tap the corner button to remove one.
+      const grid = el('<div class="hist-shorts"></div>');
+      for (const h of items) {
+        const card = shortCard(h);
+        const x = el(`<button class="hist-x" aria-label="Remove">${icon('close', 16)}</button>`);
+        x.onclick = (e) => { e.preventDefault(); e.stopPropagation(); card.classList.add('gone'); setTimeout(() => removeOne(h), 150); };
+        card.appendChild(x);
+        grid.appendChild(card);
+      }
+      box.appendChild(grid);
+      return;
+    }
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const group = (t) => (t >= today ? 'Today' : t >= today - 864e5 ? 'Yesterday' : t >= today - 6 * 864e5 ? 'This week' : t >= today - 30 * 864e5 ? 'This month' : 'Older');
@@ -578,22 +665,22 @@ function historyScreen(screen) {
     for (const h of items) {
       const g = group(h.watchedAt);
       if (g !== current) { current = g; box.appendChild(el(`<h2 class="hist-group">${g}</h2>`)); }
-      const remove = async () => {
-        await api(`/api/history/${encodeURIComponent(h.id)}`, { method: 'DELETE' }).catch(() => {}); watched.delete(h.id);
-        row.classList.add('gone');
-        setTimeout(render, 200);
-      };
+      const remove = () => { row.classList.add('gone'); setTimeout(() => removeOne(h), 200); };
       const progress = h.duration > 0 ? h.position / h.duration : null;
       const row = videoRow(h, { progress, onRemove: remove });
       swipeToRemove(row, remove);
       box.appendChild(row);
     }
   }
-  clearBtn.onclick = () => confirmSheet('Clear all watch history? Home will go back to general recommendations.', 'Clear all', async () => {
-    await api('/api/history', { method: 'DELETE' }).catch(() => {}); watched.clear();
-    toast('History cleared');
-    render();
-  });
+  clearBtn.onclick = () => {
+    const what = tab === 'shorts' ? 'Shorts' : 'video';
+    confirmSheet(`Clear your ${what} history?${tab === 'shorts' ? '' : ' Home will go back to general recommendations.'}`, 'Clear', async () => {
+      await api(`/api/history?type=${tab === 'shorts' ? 'short' : 'video'}`, { method: 'DELETE' }).catch(() => {});
+      await reloadWatched(); // keeps progress bars of the other kind
+      toast(`${tab === 'shorts' ? 'Shorts' : 'Video'} history cleared`);
+      render();
+    });
+  };
   render();
   return null;
 }

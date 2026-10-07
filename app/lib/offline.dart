@@ -40,7 +40,6 @@ class Offline {
 
   final _cancelled = <String>{};
   bool _downloading = false, _caching = false;
-  final _shortQueue = <Map<String, dynamic>>[];
 
   Directory get _downloadsDir => Directory('${_root.path}/offline');
   Directory get _shortsDir => Directory('${_root.path}/cache/shorts');
@@ -58,7 +57,8 @@ class Offline {
     } catch (_) {}
     try {
       for (final r in jsonDecode(await o._shortsIndex.readAsString()) as List) {
-        if (r['status'] == 'done') o.shorts[r['id'] as String] = (r as Map).cast<String, dynamic>();
+        // Saved before "watched" existed: those came from swiping, so count them as seen.
+        if (r['status'] == 'done') o.shorts[r['id'] as String] = {'watched': true, ...(r as Map).cast<String, dynamic>()};
       }
     } catch (_) {}
     // Downloads cut off last time (app closed) carry on where they stopped.
@@ -130,10 +130,16 @@ class Offline {
   int get downloadsBytes => downloads.values.fold(0, (a, d) => a + ((d['bytes'] as num?)?.toInt() ?? 0));
   int get shortsBytes => shorts.values.fold(0, (a, s) => a + ((s['bytes'] as num?)?.toInt() ?? 0));
 
+  /// Saved Shorts for offline viewing: ones not watched yet first (oldest saved first, the
+  /// order they would have come in the feed), then watched ones, most recent first.
   List<Map<String, dynamic>> cachedShortItems() {
-    final list = shorts.values.toList()..sort((a, b) => (b['usedAt'] as int).compareTo(a['usedAt'] as int));
+    final fresh = shorts.values.where((s) => s['watched'] != true).toList()
+      ..sort((a, b) => (a['usedAt'] as int).compareTo(b['usedAt'] as int));
+    final seen = shorts.values.where((s) => s['watched'] == true).toList()
+      ..sort((a, b) => (b['usedAt'] as int).compareTo(a['usedAt'] as int));
+    final list = [...fresh, ...seen];
     return [
-      for (final s in list) {...(s['item'] as Map).cast<String, dynamic>(), 'thumb': '/cache/shorts/${s['id']}/thumb.jpg'},
+      for (final s in list) {...(s['item'] as Map).cast<String, dynamic>(), 'thumb': '/cache/shorts/${s['id']}/thumb.jpg', 'fresh': s['watched'] != true},
     ];
   }
 
@@ -204,9 +210,31 @@ class Offline {
   }
 
   // ------------------------------------------------------------------ Shorts cache
+  //
+  // Two sources feed the cache:
+  //  - the swipe window: the Short being watched and the next few (10 on Wi-Fi, 3 on
+  //    mobile data). Downloaded first, so swiping stays smooth.
+  //  - the offline pool: [poolSize] fresh, unwatched Shorts kept ready on Wi-Fi, so opening
+  //    the app with no internet still has new Shorts (not just reruns). Lower priority.
+  // Each saved Short is marked "watched" once it has played. When space is needed, watched
+  // ones go first; offline, unwatched ones play first.
 
-  /// Adds Shorts to the cache (the one being watched and the next few).
-  void cacheShorts(List<Map<String, dynamic>> items) {
+  static const poolSize = 50; // about 65 MB at 480p, roughly 20-25 minutes of Shorts
+  final _windowQueue = <Map<String, dynamic>>[];
+  final _poolQueue = <Map<String, dynamic>>[];
+  final _watchedEarly = <String>{}; // watched before its download finished
+
+  /// Called when the Shorts download queue runs empty (the server tops the pool up again).
+  void Function()? onShortsIdle;
+
+  int get unwatchedShorts => shorts.values.where((s) => s['watched'] != true).length;
+  int get poolQueued => _poolQueue.length;
+  bool isCachedOrQueued(String id) =>
+      shorts.containsKey(id) || _windowQueue.any((q) => q['id'] == id) || _poolQueue.any((q) => q['id'] == id);
+
+  /// Adds Shorts to the cache: [pool] = background pool, otherwise the swipe window.
+  void cacheShorts(List<Map<String, dynamic>> items, {bool pool = false}) {
+    final queue = pool ? _poolQueue : _windowQueue;
     for (final it in items) {
       final id = it['id'] as String?;
       if (id == null) continue;
@@ -215,18 +243,33 @@ class Offline {
         have['usedAt'] = DateTime.now().millisecondsSinceEpoch;
         continue;
       }
-      if (_shortQueue.any((q) => q['id'] == id)) continue;
-      _shortQueue.add(it);
+      if (_windowQueue.any((q) => q['id'] == id)) continue;
+      _poolQueue.removeWhere((q) => q['id'] == id); // the swipe window wants it now
+      queue.add(it);
     }
-    // Keep the queue short: it follows where the user is now.
-    while (_shortQueue.length > 8) {
-      _shortQueue.removeAt(0);
+    // The window follows where the user is: drop what they've already swiped past.
+    while (_windowQueue.length > 12) {
+      _windowQueue.removeAt(0);
     }
     _runShorts();
   }
 
+  /// A Short has been played (from the feed, a shelf or offline).
+  void markWatched(String id) {
+    final s = shorts[id];
+    if (s == null) {
+      _watchedEarly.add(id);
+      return;
+    }
+    if (s['watched'] == true) return;
+    s['watched'] = true;
+    s['usedAt'] = DateTime.now().millisecondsSinceEpoch;
+    _saveShorts();
+  }
+
   Future<void> clearShorts() async {
-    _shortQueue.clear();
+    _windowQueue.clear();
+    _poolQueue.clear();
     shorts.clear();
     await _saveShorts();
     try {
@@ -240,15 +283,20 @@ class Offline {
     if (_caching) return;
     _caching = true;
     try {
-      while (_shortQueue.isNotEmpty) {
-        final it = _shortQueue.removeAt(0);
+      while (_windowQueue.isNotEmpty || _poolQueue.isNotEmpty) {
+        final fromPool = _windowQueue.isEmpty;
+        final it = (fromPool ? _poolQueue : _windowQueue).removeAt(0);
         final id = it['id'] as String;
         if (shorts.containsKey(id)) continue;
         final dir = Directory('${_shortsDir.path}/$id');
-        final rec = <String, dynamic>{'id': id, 'item': it, 'status': 'downloading', 'bytes': 0, 'usedAt': DateTime.now().millisecondsSinceEpoch, 'done': 0, 'total': 0};
+        final rec = <String, dynamic>{
+          'id': id, 'item': it, 'status': 'downloading', 'bytes': 0, 'usedAt': DateTime.now().millisecondsSinceEpoch,
+          'done': 0, 'total': 0, 'watched': false, 'pool': fromPool,
+        };
         try {
           await _save(id, dir, _shortHeight, rec, full: false);
           rec['status'] = 'done';
+          if (_watchedEarly.remove(id)) rec['watched'] = true;
           final v = await _details(id);
           rec['item'] = {
             'type': 'short', 'id': id, 'title': v['title'] ?? it['title'] ?? '',
@@ -266,11 +314,16 @@ class Offline {
     } finally {
       _caching = false;
     }
+    onShortsIdle?.call();
   }
 
-  // Oldest-used first, until the cache fits its limit.
+  // Until the cache fits its limit: watched Shorts first (oldest first), then unwatched.
   Future<void> _evictShorts() async {
-    final list = shorts.values.toList()..sort((a, b) => (a['usedAt'] as int).compareTo(b['usedAt'] as int));
+    final list = shorts.values.toList()
+      ..sort((a, b) {
+        final w = (a['watched'] == true ? 0 : 1).compareTo(b['watched'] == true ? 0 : 1);
+        return w != 0 ? w : (a['usedAt'] as int).compareTo(b['usedAt'] as int);
+      });
     var total = shortsBytes;
     for (final s in list) {
       if (total <= shortsCacheLimit) break;

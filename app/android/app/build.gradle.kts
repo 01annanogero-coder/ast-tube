@@ -45,6 +45,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Installed copies are signed with the release key now, so debug builds must be too
+            // (Android refuses an update signed with a different key).
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
         release {
             // Without key.properties (e.g. someone else's PC) release builds fall back to the debug key.
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")

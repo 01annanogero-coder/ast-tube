@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'offline.dart';
+import 'recommend.dart';
 
 class LocalServer {
   static const _yt = MethodChannel('asttube/youtube');
@@ -42,8 +43,16 @@ class LocalServer {
 
   late final Offline _offline;
 
+  /// "Not interested" videos and "Don't recommend" channels (blocklist.json, on the phone).
+  Blocklist _blocked = Blocklist();
+  File? _blockFile;
+  Future<void> _saveBlocked() async => _blockFile?.writeAsString(jsonEncode(_blocked.toJson()));
+
   /// Set by main.dart from Android's connectivity state.
   bool online = true;
+
+  /// Mobile data (or a metered hotspot). Set by main.dart. The offline Shorts pool only fills on Wi-Fi.
+  bool metered = true;
 
   /// The installed app version (shown in Settings › About).
   String version = '';
@@ -57,6 +66,10 @@ class LocalServer {
     final support = await getApplicationSupportDirectory();
     _offline = await Offline.open(support, _rawVideo);
     _settingsFile = File('${support.path}/settings.json');
+    _blockFile = File('${support.path}/blocklist.json');
+    try {
+      _blocked = Blocklist.fromJson(jsonDecode(await _blockFile!.readAsString()) as Map);
+    } catch (_) {}
     try {
       settings.addAll((jsonDecode(await _settingsFile!.readAsString()) as Map).cast<String, dynamic>());
     } catch (_) {}
@@ -67,6 +80,11 @@ class LocalServer {
       _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     }
     _server.listen((req) => _handle(req).catchError((_) {}));
+    _schedulePoolRefill(const Duration(seconds: 20)); // after Home has loaded
+    // Some Shorts fail to download (removed, region-locked): top up again when the queue empties.
+    _offline.onShortsIdle = () {
+      if (_emptyRefills < 3 && Offline.poolSize - _offline.unwatchedShorts > 0) _schedulePoolRefill(const Duration(seconds: 30));
+    };
   }
 
   Future<void> _handle(HttpRequest req) async {
@@ -80,7 +98,7 @@ class LocalServer {
         return await _asset(res, path == '/' ? 'index.html' : Uri.decodeComponent(path.substring(1)));
       }
       final parts = path.substring(5).split('/').map(Uri.decodeComponent).toList();
-      if (parts[0] == 'net') return _json(res, {'online': online, 'version': version});
+      if (parts[0] == 'net') return _json(res, {'online': online, 'metered': metered, 'version': version});
       // Pull-to-refresh: drop cached results so this request asks YouTube again.
       if (p['fresh'] == '1') {
         final prefix = switch (parts[0]) {
@@ -135,6 +153,17 @@ class LocalServer {
           return await _offlineRoute(req, parts.length > 1 ? parts[1] : null, parts.length > 2 ? parts[2] : null);
         case 'related':
           return _json(res, await _related(parts[1], next));
+        case 'taste':
+          // What the recommendations are based on right now (for checking; read-only).
+          final t = Taste.from(_history.items, _blocked);
+          return _json(res, {
+            'seeds': [for (final x in t.seeds) {'title': x['title'], 'channel': x['channel'], 'topic': topicOf(x), 'weight': x['_weight']}],
+            'topics': [for (final e in t.topics) e.key],
+            'channels': [for (final c in t.channels) c.name],
+            'shortChannels': t.shortChannels,
+          });
+        case 'blocklist':
+          return await _blocklistRoute(req);
         case 'settings':
           if (req.method == 'POST') {
             settings.addAll((jsonDecode(await utf8.decodeStream(req)) as Map).cast<String, dynamic>());
@@ -208,6 +237,7 @@ class LocalServer {
     final hls = v['hls'] as String?;
     return {
       ...v,
+      'related': _blocked.filter(v['related'] as List),
       'hls': hls == null ? null : '/api/hls?u=${Uri.encodeComponent(hls)}',
       'captions': [
         for (final c in v['captions'] as List) {...c as Map, 'url': '/api/captions?u=${Uri.encodeComponent(c['url'] as String)}'},
@@ -257,8 +287,9 @@ class LocalServer {
   final _searchDone = <String>{};
 
   List<String> _discoveryQueries() {
-    final videos = _history.items.where((h) => h['type'] == 'video');
-    final channels = videos.map((h) => '${h['channel'] ?? ''}').where((c) => c.isNotEmpty).toSet().take(8);
+    final taste = Taste.from(_history.items, _blocked);
+    final videos = taste.seeds;
+    final channels = [...taste.channels.map((c) => c.name), ...videos.map((h) => '${h['channel'] ?? ''}')].where((c) => c.isNotEmpty).toSet().take(8);
     // A recent title, minus the "(Official Video)" style noise, makes a good topic.
     final titles = videos.take(4).map((h) => '${h['title'] ?? ''}'
         .replaceAll(RegExp(r'[\(\[\|].*$'), '')
@@ -297,7 +328,7 @@ class LocalServer {
       }
     }
     items.shuffle(_random);
-    return {'items': items, 'shorts': [], 'next': 'd|$n'};
+    return {'items': _blocked.filter(items), 'shorts': [], 'next': 'd|$n'};
   }
 
   // "Up next" below the player never ends: YouTube's own watch-next pages first,
@@ -380,7 +411,7 @@ class LocalServer {
         } catch (_) {}
       }
     }
-    return {'items': items, 'shorts': shorts, 'next': more};
+    return {'items': _blocked.filter(items), 'shorts': _blocked.filter(shorts), 'next': more};
   }
 
   // Chips: YouTube's curated list first, then search pages on the chip's topic.
@@ -404,7 +435,7 @@ class LocalServer {
           items.addAll(await _searchPage(topics[n % topics.length], seen));
         } catch (_) {}
       }
-      return {'items': items, 'next': 's|$n'};
+      return {'items': _blocked.filter(items), 'next': 's|$n'};
     }
     if (next == null) seen.clear();
     final r = Map<String, dynamic>.from(await _cached('feed|$kiosk|$next', const Duration(minutes: 15), () => _call('kiosk', {'id': kiosk, 'next': next})) as Map);
@@ -412,29 +443,45 @@ class LocalServer {
       seen.add(v['id']);
     }
     r['next'] ??= 's|0';
+    r['items'] = _blocked.filter(r['items'] as List);
     return r;
   }
 
   Future<List<dynamic>> _buildHome({bool shuffle = false}) async {
-    final seeds = _history.items.map((h) => h['id'] as String).toSet().take(10).toList();
-    final lists = <List<dynamic>>[];
+    // What you like, from history: dwell-gated, fading over ~3 days, capped per channel/topic
+    // (recommend.dart). Accidental taps and blocked channels play no part.
+    final taste = Taste.from(_history.items, _blocked);
+    final watched = _history.items.map((h) => h['id']).toSet();
+
     var fetches = 0;
-    for (final id in seeds) {
-      var related = _history.related[id];
-      if (related == null && fetches < 3) {
+    Future<List<dynamic>> relatedOf(Map s) async {
+      final id = s['id'] as String;
+      var r = _history.related[id];
+      if (r == null && fetches < 3) {
         fetches++;
         try {
-          related = (await _video(id))['related'] as List;
+          r = (await _video(id))['related'] as List;
         } catch (_) {}
       }
-      // Refreshing reshuffles each list, so pulling down gives a different Home.
-      if (related != null) lists.add(shuffle ? (related.toList()..shuffle(_random)) : related);
+      return r ?? [];
     }
-    if (shuffle) lists.shuffle(_random);
-    final watched = _history.items.map((h) => h['id']).toSet();
-    final fromHistory = _interleave(lists, skip: watched);
 
-    // Curated lists: everything on first launch, a sprinkle otherwise.
+    // One bucket per topic, strongest topic first; each mixes its seeds' related videos.
+    final interests = <List<dynamic>>[];
+    final allRelated = <List<dynamic>>[];
+    for (final t in taste.topics) {
+      final lists = <List<dynamic>>[];
+      for (final s in t.value) {
+        final r = await relatedOf(s);
+        allRelated.add(r);
+        // Refreshing reshuffles each list, so pulling down gives a different Home.
+        lists.add(shuffle ? (r.toList()..shuffle(_random)) : r);
+      }
+      if (shuffle) lists.shuffle(_random);
+      interests.add(_interleave(lists, skip: watched));
+    }
+
+    // YouTube's curated lists: the whole Home on first launch, "get out of the bubble" slots after.
     final kiosks = await Future.wait(['trending_music', 'trending_gaming', 'trending_movies_and_shows', 'live'].map((k) async {
       try {
         final r = await _cached('feed|$k|null', const Duration(minutes: 15), () => _call('kiosk', {'id': k, 'next': null})) as Map;
@@ -445,18 +492,39 @@ class LocalServer {
     }));
     final curated = _interleave(kiosks, skip: watched);
 
-    // Mixes, like YouTube's "Mix - <song>" cards: the ones YouTube suggests next to
-    // what you watched, plus one built around each of your latest videos. On first
-    // launch they come from the trending music list.
+    // Channels you keep coming back to: their latest uploads.
+    final returning = await Future.wait(taste.channels.take(3).map((c) async {
+      try {
+        final r = await _cached('channel|${c.id}|videos|null', const Duration(minutes: 30),
+            () => _call('channel', {'id': c.id, 'tab': 'videos', 'next': null})) as Map;
+        final items = (r['items'] as List).take(15).toList();
+        return shuffle ? (items..shuffle(_random)) : items;
+      } catch (_) {
+        return <dynamic>[];
+      }
+    }));
+
+    final videos = taste.isEmpty
+        ? _blocked.filter(curated)
+        : composeHome(
+            interests: interests,
+            curated: curated,
+            returning: _interleave(returning, skip: watched),
+            skip: watched,
+            blocked: _blocked,
+          );
+
+    // Mixes, like YouTube's "Mix - <song>" cards: around songs you really listened to, plus
+    // the ones YouTube suggests next to them. On first launch, from the trending music list.
     final mixes = <dynamic>[];
     final mixIds = <String>{};
     void addMix(Map m) {
-      if (mixIds.add(m['id'] as String)) mixes.add(m);
+      if (!_blocked.blocks(m) && mixIds.add(m['id'] as String)) mixes.add(m);
     }
-    for (final h in _history.items.where((h) => h['type'] == 'video' && _isMusic(h)).take(4)) {
-      addMix(_mixFor(h));
+    for (final s in taste.seeds.where(_isMusic).take(4)) {
+      addMix(_mixFor(s));
     }
-    for (final l in lists) {
+    for (final l in allRelated) {
       for (final m in l.where((i) => i['type'] == 'mix')) {
         addMix(m as Map);
       }
@@ -467,7 +535,6 @@ class LocalServer {
       }
     }
 
-    final videos = fromHistory.isEmpty ? curated : _blend(fromHistory, curated);
     // A Mix after the 2nd video, then one every 6.
     final out = <dynamic>[];
     var m = 0;
@@ -494,21 +561,6 @@ class LocalServer {
         'thumb': 'https://i.ytimg.com/vi/${v['id']}/hqdefault.jpg',
       };
 
-  /// Roughly one curated video for every four from your history.
-  static List<dynamic> _blend(List<dynamic> fromHistory, List<dynamic> curated) {
-    final out = <dynamic>[];
-    final seen = <String>{};
-    var c = 0;
-    for (var i = 0; i < fromHistory.length; i++) {
-      if (seen.add(fromHistory[i]['id'] as String)) out.add(fromHistory[i]);
-      if (i % 4 == 3 && c < curated.length && seen.add(curated[c]['id'] as String)) out.add(curated[c++]);
-    }
-    for (; c < curated.length; c++) {
-      if (seen.add(curated[c]['id'] as String)) out.add(curated[c]);
-    }
-    return out;
-  }
-
   /// Round-robin through several lists, keeping only regular videos, no repeats.
   static List<dynamic> _interleave(List<List<dynamic>> lists, {Set<dynamic> skip = const {}}) {
     final out = <dynamic>[];
@@ -524,9 +576,9 @@ class LocalServer {
 
   // ------------------------------------------------------------------ shorts
 
-  // Topics for Shorts: channels you watched recently, then general topics.
+  // Topics for Shorts: channels you really watched (dwell-gated, fading), then general topics.
   List<String> _shortQueries() {
-    final channels = _history.items.map((h) => h['channel'] as String? ?? '').where((c) => c.isNotEmpty).toSet().take(5).toList();
+    final channels = Taste.from(_history.items, _blocked).shortChannels;
     final topics = [..._shortTopics]..shuffle(_random);
     final out = <String>[];
     for (var i = 0; i < max(channels.length, topics.length); i++) {
@@ -585,7 +637,59 @@ class LocalServer {
       }
     }
     items.shuffle(_random);
-    return {'items': items, 'next': index < queries.length ? '$feed|$index|$page|${token ?? ''}' : null};
+    return {'items': _blocked.filter(items), 'next': index < queries.length ? '$feed|$index|$page|${token ?? ''}' : null};
+  }
+
+  // ------------------------------------------------------------------ offline Shorts pool
+
+  // Keeps Offline.poolSize fresh, unwatched Shorts saved for opening the app without internet.
+  // Fills only online and on Wi-Fi (never on mobile data): 20 s after launch, when Wi-Fi
+  // comes back, and a minute after Shorts are watched.
+  bool _refilling = false;
+  Timer? _refillTimer;
+  final _poolNext = <String, String?>{}; // search topic -> next page token
+  int _emptyRefills = 0; // refills in a row that found nothing new (stop retrying after 3)
+
+  void networkChanged() {
+    _emptyRefills = 0;
+    if (online && !metered) _schedulePoolRefill(const Duration(seconds: 5));
+  }
+
+  void _schedulePoolRefill(Duration delay) {
+    _refillTimer?.cancel();
+    _refillTimer = Timer(delay, _refillPool);
+  }
+
+  Future<void> _refillPool() async {
+    if (_refilling || !online || metered) return;
+    var need = Offline.poolSize - _offline.unwatchedShorts - _offline.poolQueued;
+    if (need <= 0) return;
+    _refilling = true;
+    try {
+      final watched = _history.items.map((h) => h['id']).toSet();
+      final topics = _shortQueries();
+      final picked = <Map<String, dynamic>>[];
+      // A few searches at most per refill; each gives ~20 Shorts.
+      for (var i = 0; i < 8 && picked.length < need && topics.isNotEmpty; i++) {
+        final q = topics[i % topics.length];
+        if (_poolNext.containsKey(q) && _poolNext[q] == null) continue; // topic used up
+        try {
+          final r = await _call('shorts', {'q': q, 'next': _poolNext[q]}) as Map;
+          _poolNext[q] = r['next'] as String?;
+          for (final s in r['items'] as List) {
+            final id = s['id'] as String;
+            if (watched.contains(id) || _blocked.blocks(s) || _offline.isCachedOrQueued(id) || picked.any((p) => p['id'] == id)) continue;
+            picked.add((s as Map).cast<String, dynamic>());
+            if (picked.length >= need) break;
+          }
+        } catch (_) {}
+      }
+      picked.shuffle(_random); // mix the topics, like the feed
+      _emptyRefills = picked.isEmpty ? _emptyRefills + 1 : 0;
+      _offline.cacheShorts(picked, pool: true);
+    } finally {
+      _refilling = false;
+    }
   }
 
   // ------------------------------------------------------------------ offline
@@ -610,7 +714,7 @@ class LocalServer {
             },
         ],
         'downloadsBytes': _offline.downloadsBytes,
-        'shorts': {'count': _offline.shorts.length, 'bytes': _offline.shortsBytes, 'limit': Offline.shortsCacheLimit},
+        'shorts': {'count': _offline.shorts.length, 'fresh': _offline.unwatchedShorts, 'pool': Offline.poolSize, 'bytes': _offline.shortsBytes, 'limit': Offline.shortsCacheLimit},
       });
     }
     if (id == 'shorts') {
@@ -690,21 +794,55 @@ class LocalServer {
     await res.close();
   }
 
+  // ------------------------------------------------------------------ blocklist
+
+  // GET: the list. POST {"video": {"id"}} or {"channel": {"id", "name"}}: add.
+  // DELETE ?video=<id> / ?channel=<id>: remove one; no query: clear all.
+  Future<void> _blocklistRoute(HttpRequest req) async {
+    final res = req.response;
+    final q = req.uri.queryParameters;
+    if (req.method == 'POST') {
+      final b = jsonDecode(await utf8.decodeStream(req)) as Map;
+      final v = b['video'] as Map?, c = b['channel'] as Map?;
+      if (v?['id'] != null) _blocked.videos.add('${v!['id']}');
+      if (c?['id'] != null) _blocked.channels['${c!['id']}'] = '${c['name'] ?? ''}';
+      _homeItems = _homeItems.where((i) => !_blocked.blocks(i)).toList(); // gone from Home at once
+      await _saveBlocked();
+    } else if (req.method == 'DELETE') {
+      if (q['video'] != null) {
+        _blocked.videos.remove(q['video']);
+      } else if (q['channel'] != null) {
+        _blocked.channels.remove(q['channel']);
+      } else {
+        _blocked.videos.clear();
+        _blocked.channels.clear();
+      }
+      await _saveBlocked();
+    }
+    _json(res, _blocked.toJson());
+  }
+
   // ------------------------------------------------------------------ history
 
   Future<void> _historyRoute(HttpRequest req, String? id) async {
     final res = req.response;
     switch (req.method) {
       case 'GET':
-        return _json(res, {'items': _history.items});
+        return _json(res, {'items': _history.items, 'limits': {'videos': _History.maxVideos, 'shorts': _History.maxShorts}});
       case 'POST':
         final body = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
         final video = body['video'] as Map<String, dynamic>?;
         if (video == null || video['id'] is! String) return _json(res, {'error': 'Missing video'}, 400);
         await _history.add(video, (body['position'] as num?)?.round() ?? 0);
+        if (_History.isShort(video)) {
+          _offline.markWatched(video['id'] as String);
+          _schedulePoolRefill(const Duration(minutes: 1)); // replace what was watched
+        }
         return _json(res, {'ok': true});
       case 'DELETE':
-        await (id == null ? _history.clear() : _history.remove(id));
+        // DELETE /api/history?type=short|video clears just that kind.
+        final type = req.uri.queryParameters['type'];
+        await (id != null ? _history.remove(id) : type != null ? _history.clearType(shorts: type == 'short') : _history.clear());
         return _json(res, {'ok': true});
     }
     _json(res, {'error': 'Method not allowed'}, 405);
@@ -829,7 +967,10 @@ class LocalServer {
 class _History {
   _History(this._file, this._relatedFile, this.items, this.related);
 
-  static const _max = 500;
+  // Separate limits (Annan, 2026-10-07): the newest 120 long videos and 200 Shorts are
+  // kept; watching one more drops the oldest of the same kind.
+  static const maxVideos = 120;
+  static const maxShorts = 200;
   final File _file;
   final File _relatedFile;
   final List<Map<String, dynamic>> items;
@@ -848,14 +989,35 @@ class _History {
     try {
       related = (jsonDecode(await relatedFile.readAsString()) as Map).cast<String, List<dynamic>>();
     } catch (_) {}
-    return _History(file, relatedFile, items, related);
+    final h = _History(file, relatedFile, items, related);
+    if (h._trim()) h._save(); // history saved before the limits existed
+    return h;
   }
 
+  static bool isShort(Map h) => h['type'] == 'short' || h['short'] == true;
+
   Future<void> add(Map<String, dynamic> video, int position) {
+    final before = items.where((h) => h['id'] == video['id']).firstOrNull;
     items.removeWhere((h) => h['id'] == video['id']);
-    items.insert(0, {...video, 'watchedAt': DateTime.now().millisecondsSinceEpoch, 'position': position});
-    if (items.length > _max) items.removeRange(_max, items.length);
+    // How far they got, even after rewinding: recommendations count only real watching.
+    final reached = max(position, ((before?['maxPosition'] ?? before?['position']) as num?)?.toInt() ?? 0);
+    items.insert(0, {
+      ...video,
+      'watchedAt': DateTime.now().millisecondsSinceEpoch,
+      // Shorts always start from the beginning, so there's no position to resume.
+      'position': isShort(video) ? 0 : position,
+      'maxPosition': reached,
+    });
+    _trim();
     return _save();
+  }
+
+  /// Drops the oldest entries past each limit. Items are newest first. True if anything went.
+  bool _trim() {
+    var videos = 0, shorts = 0;
+    final before = items.length;
+    items.retainWhere((h) => isShort(h) ? ++shorts <= maxShorts : ++videos <= maxVideos);
+    return items.length != before;
   }
 
   Future<void> remove(String id) {
@@ -867,6 +1029,13 @@ class _History {
   Future<void> clear() {
     items.clear();
     related.clear();
+    return _save();
+  }
+
+  Future<void> clearType({required bool shorts}) {
+    final gone = items.where((h) => isShort(h) == shorts).map((h) => h['id']).toSet();
+    items.removeWhere((h) => gone.contains(h['id']));
+    related.removeWhere((k, _) => gone.contains(k));
     return _save();
   }
 

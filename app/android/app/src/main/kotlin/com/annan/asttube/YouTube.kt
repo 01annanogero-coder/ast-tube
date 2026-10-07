@@ -226,6 +226,7 @@ class YouTube {
             .put("duration", if (live) -1 else s.duration)
             .put("live", live)
             .put("short", s.url.contains("/shorts/"))
+            .put("category", s.category ?: "") // YouTube's category ("Music", "Education"...): the topic for recommendations
             .put("thumb", best(s.thumbnails) ?: JSONObject.NULL)
             .put("hls", s.hlsUrl?.takeIf { it.isNotEmpty() } ?: JSONObject.NULL)
             // Audio only, for background play (Android's WebView pauses <video> in the background, not <audio>).

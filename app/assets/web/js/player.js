@@ -151,7 +151,12 @@ function createPlayer(container, opts = {}) {
     if (root.classList.contains('show-ctl')) { root.classList.remove('show-ctl'); clearTimeout(hideTimer); }
     else showControls();
   }
-  function togglePlay() { if (video.paused) video.play().catch(() => {}); else video.pause(); showControls(); }
+  // A tap on play/pause is the user's choice (unlike Android pausing us in the background).
+  function togglePlay() {
+    if (video.paused) { if (opts.onUserPlay) opts.onUserPlay(); video.play().catch(() => {}); }
+    else { if (opts.onUserPause) opts.onUserPause(); video.pause(); }
+    showControls();
+  }
   function seekBy(d, side) {
     if (!isFinite(video.duration) && !details.live) return;
     video.currentTime = Math.max(0, Math.min((video.duration || 0) - 0.5, video.currentTime + d));

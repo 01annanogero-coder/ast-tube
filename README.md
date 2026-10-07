@@ -33,7 +33,8 @@ you to allow AST Tube to install apps.
 
 | | |
 | --- | --- |
-| **Home** | Built from the related videos of what you watched, like signed-out YouTube, with Mix cards and a Shorts shelf. On first launch (no history yet) it shows YouTube's curated Music, Gaming, Movies and Live lists. |
+| **Home** | Built on the phone from what you **really** watched: a video counts after 30% or 2 minutes (a Short after half or 15 s), and interests fade by half every 3 days. Every 10 cards mix your main and second interests, YouTube's curated lists and new uploads from channels you keep returning to, so one binge can't take over. Mix cards and a Shorts shelf. On first launch: YouTube's curated lists. |
+| **Not interested** | ⋮ → "Not interested" or "Don't recommend channel" (with Undo). Kept on the phone; Settings › Hidden from recommendations to undo. |
 | **Mix** | YouTube's endless music playlists. Start one from a Mix card or the Mix button on any video. The queue has shuffle and keeps loading new songs. |
 | **Series and playlists** | Courses like Blender Guru's Donut tutorial play in order with a queue ("3 / 14"), Play all and Shuffle, moving to the next episode on their own. |
 | **Pull to refresh** | Pull down on Home, the chips or search results for fresh results. |
@@ -48,8 +49,8 @@ you to allow AST Tube to install apps.
 | **Channels and playlists** | Videos, Shorts, Live and Playlists tabs. |
 | **Comments** | Read-only, with clickable timestamps. |
 | **Downloads** | "Download" under any video (or in its ⋮ menu): pick 240p–1080p, each with its size. Saved inside the app on this phone, never in your Downloads folder. Plays without internet, including in the background, with captions. Settings › Downloads lists them with progress. |
-| **Offline Shorts** | Shorts you watch (and the next few) are kept in a 300 MB rolling cache, oldest removed first. Without internet the app opens straight to them. |
-| **Settings** | Watch history (grouped by day, swipe to remove, Clear all), Autoplay, Background play, preferred quality. |
+| **Offline Shorts** | On Wi-Fi, AST Tube keeps 50 new Shorts ready (plus the next 10 as you swipe; 3 on mobile data) in a 300 MB cache. Without internet it opens straight to them, new ones first. |
+| **Settings** | Watch history in two tabs: Videos (last 120, resume where you stopped) and Shorts (last 200, always from the start). Autoplay, Background play, preferred quality, hidden recommendations. |
 | **Navigation** | Bottom bar: Home, Shorts, Search, Settings. |
 
 ## How it works

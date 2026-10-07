@@ -13,7 +13,7 @@ const ROUTES = [
   [/^#\/channel\/([^/]+)(?:\/(\w+))?$/, 'channel', channelScreen, (m) => ({ id: decodeURIComponent(m[1]), tab: m[2] || 'videos' }), true],
   [/^#\/playlist\/([\w-]+)$/, 'playlist', playlistScreen, (m) => ({ id: m[1] }), true],
   [/^#\/settings$/, 'settings', settingsScreen, () => ({}), false],
-  [/^#\/history$/, 'history', historyScreen, () => ({}), false],
+  [/^#\/history(?:\/(shorts))?$/, 'history', historyScreen, (m) => ({ tab: m[1] || 'videos' }), false],
   [/^#\/downloads$/, 'downloads', downloadsScreen, () => ({}), false],
 ];
 
@@ -143,6 +143,15 @@ function paintNav() {
 }
 
 // ---------------------------------------------------------------- back
+
+// Inside the open player, another video (Up next, Mix, playlist) replaces the current one in
+// the back history, so Back minimizes the player and returns to Home/search, not the last video.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[href^="#/watch/"], a[href^="#/play/"]');
+  if (!a || Watch.mode !== 'full' || !a.closest('.watch, .sheet-wrap')) return;
+  e.preventDefault();
+  location.replace(a.getAttribute('href'));
+});
 
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-back]');

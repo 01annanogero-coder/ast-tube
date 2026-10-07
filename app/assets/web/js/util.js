@@ -33,6 +33,12 @@ const watched = new Map(); // id -> { position, duration }
 const historyReady = api('/api/history').then((h) => {
   for (const it of h.items || []) watched.set(it.id, { position: it.position || 0, duration: it.duration || 0 });
 }).catch(() => {});
+// Re-reads the progress bars' data (after part of the history was cleared).
+async function reloadWatched() {
+  watched.clear();
+  try { for (const it of (await api('/api/history')).items || []) watched.set(it.id, { position: it.position || 0, duration: it.duration || 0 }); } catch (e) { /* bars just won't show */ }
+}
+
 function progressOf(id) {
   const w = watched.get(id);
   if (!w || !(w.duration > 0) || w.position < 5) return null;
@@ -145,6 +151,18 @@ function avatar(url, name, size = 36) {
   if (url) return `<img class="avatar" src="${esc(url)}" width="${size}" height="${size}" loading="lazy" alt="" referrerpolicy="no-referrer">`;
   const letter = esc((name || '?').replace(/^@/, '').charAt(0).toUpperCase());
   return `<span class="avatar avatar-letter" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.45)}px">${letter}</span>`;
+}
+
+// A toast with an Undo button (stays a little longer).
+function undoToast(msg, undo) {
+  const t = el(`<div class="toast toast-undo"><span></span><button>Undo</button></div>`);
+  t.querySelector('span').textContent = msg;
+  let gone = false;
+  const hide = () => { if (gone) return; gone = true; t.classList.remove('show'); setTimeout(() => t.remove(), 300); };
+  t.querySelector('button').onclick = () => { hide(); undo(); };
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(hide, 5000);
 }
 
 function toast(msg) {
@@ -325,10 +343,12 @@ function waitFor(test, ms = 15000) {
 
 // The real connection state comes from Android (the WebView's navigator.onLine always says true).
 let netOnline = true;
+let netMetered = true; // mobile data: save fewer Shorts ahead
 const isOffline = () => !netOnline;
 let appVersion = '';
-const netReady = api('/api/net').then((r) => { netOnline = r.online !== false; appVersion = r.version || ''; }).catch(() => {});
+const netReady = api('/api/net').then((r) => { netOnline = r.online !== false; netMetered = r.metered !== false; appVersion = r.version || ''; }).catch(() => {});
 window.astNet = (online) => {
+  api('/api/net').then((r) => { netMetered = r.metered !== false; }).catch(() => {});
   if (online === netOnline) return;
   netOnline = online;
   document.body.toggleAttribute('data-offline', !online);

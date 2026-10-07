@@ -56,6 +56,8 @@ class MainActivity : FlutterActivity() {
         net.setMethodCallHandler { call, result ->
             when (call.method) {
                 "online" -> result.success(online())
+                // Mobile data (or a metered hotspot): don't fill the offline Shorts pool on it.
+                "metered" -> result.success(cm.isActiveNetworkMetered)
                 "version" -> result.success(packageManager.getPackageInfo(packageName, 0).versionName)
                 else -> result.notImplemented()
             }

@@ -166,6 +166,11 @@ calls `GET /api/video/<id>` and uses its `hls`/`sources` like any video.
 - `GET /api/offline/shorts` → saved Shorts as ShortItems. `POST /api/offline/shorts` `{ items: [ShortItem] }` → save these. `DELETE /api/offline/shorts` → clear.
 - Saved files are served from `/offline/<id>/...` and `/cache/shorts/<id>/...` (Range supported). `/api/video/<id>` returns these local URLs whenever a saved copy exists, online or not.
 
+### Recommendations
+- `GET /api/blocklist` → `{ videos: [id], channels: [{ id, name }] }`. `POST {"video": {"id"}}` or `{"channel": {"id", "name"}}` adds; `DELETE ?video=<id>` / `?channel=<id>` removes one, no query clears all. Blocked items never appear in Home, chips, Up next, related videos or Shorts (search is not filtered).
+- `GET /api/taste` → what Home is currently based on: `{ seeds, topics, channels, shortChannels }` (read-only, for checking).
+- History entries also keep `maxPosition` (furthest point reached; for Shorts, total seconds watched) and `category`. Limits: 120 videos, 200 Shorts; `DELETE /api/history?type=short|video` clears one kind.
+
 ### Streaming helpers (used through URLs the API already returns; the UI never builds these)
 - `GET /api/hls?u=<url>`: proxied HLS playlist or segment.
 - `GET /api/captions?u=<url>`: proxied caption track as WebVTT.

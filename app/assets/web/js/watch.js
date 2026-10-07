@@ -34,7 +34,9 @@ const Watch = (() => {
   const audio = new Audio();
   audio.preload = 'auto';
   let audioMode = false;
-  let wantPlay = false; // the user's intent, not the system pausing us
+  // Only a pause the user asked for (player, mini player, notification, headset) stops
+  // background play. Android pausing the video when we leave the app doesn't count.
+  let userPaused = false;
   const media = () => (audioMode ? audio : player.video);
   const now = () => media().currentTime || 0;
   const isPaused = () => media().paused;
@@ -51,8 +53,9 @@ const Watch = (() => {
   }
 
   const player = createPlayer(layer.querySelector('.watch-player'), {
+    onUserPlay() { userPaused = false; },
+    onUserPause() { userPaused = true; },
     onPlay() {
-      wantPlay = true;
       save(player.time);
       // Up next is likely; have it ready when this one ends.
       if (!warmed && video) {
@@ -60,12 +63,7 @@ const Watch = (() => {
         setTimeout(() => { const n = nextItem(); if (n && video) prefetch(n.id); }, 8000);
       }
     },
-    onPause(t) {
-      save(t);
-      // The system pause on leaving the app can land just before "hidden"; only a pause
-      // that's still in place with the app visible counts as the user's.
-      setTimeout(() => { if (!document.hidden && !audioMode && player.paused) wantPlay = false; }, 400);
-    },
+    onPause(t) { save(t); },
     onProgress(t) {
       if (audioMode) return;
       if (Date.now() - lastSaved > 15000) save(t);
@@ -82,8 +80,6 @@ const Watch = (() => {
 
   audio.addEventListener('ended', () => { if (audioMode) ended(); });
   for (const ev of ['play', 'pause', 'seeked', 'loadedmetadata']) audio.addEventListener(ev, () => { if (audioMode) paintState(); });
-  audio.addEventListener('play', () => { if (audioMode) wantPlay = true; });
-  audio.addEventListener('pause', () => { if (audioMode && !audio.ended) wantPlay = false; });
   audio.addEventListener('timeupdate', () => {
     if (!audioMode) return;
     if (Date.now() - lastSaved > 15000) save(audio.currentTime);
@@ -93,8 +89,13 @@ const Watch = (() => {
   audio.addEventListener('error', () => { if (audioMode && audio.src) toast('Background play failed for this video'); });
 
   function toAudio() {
-    if (audioMode || !video || !video.audio || !settings.background || !wantPlay) return;
+    if (audioMode || !id || !settings.background || userPaused) return;
+    // Still loading: switch now; load() starts the audio as soon as the details arrive.
+    if (!video) { audioMode = true; return; }
+    if (!video.audio) return; // live streams have no separate audio track
     audioMode = true;
+    // Left during the "Up next" countdown (or right at the end): go straight to the next one.
+    if (player.video.ended) { player.clearNext(); player.pause(); ended(); return; }
     const t = player.time;
     player.pause();
     audio.src = video.audio;
@@ -105,10 +106,11 @@ const Watch = (() => {
 
   function toVideo() {
     if (!audioMode) return;
-    const t = audio.currentTime, play = !audio.paused || wantPlay;
+    const t = audio.currentTime, play = !userPaused;
     audio.pause();
     audioMode = false;
-    if (!player.details) { if (video) player.load(video, t, { autoplay: play }); }
+    if (!video) { paintState(); return; } // still loading: it will start as video
+    if (!player.details) player.load(video, t, { autoplay: play });
     else {
       player.video.currentTime = t;
       if (play) player.play();
@@ -161,7 +163,7 @@ const Watch = (() => {
     audio.pause();
     audio.removeAttribute('src');
     audioMode = false;
-    wantPlay = false;
+    userPaused = false;
     id = null; video = null; queue = null; loadToken++;
     body.innerHTML = '';
     setMode('closed');
@@ -174,7 +176,8 @@ const Watch = (() => {
   // Go to another video. On the full page that's a real navigation (so Back
   // works); in the mini player or in the background it just switches videos.
   function navigate(item) {
-    if (mode === 'full' && !document.hidden) go(`#/watch/${item.id}${queue ? `?list=${encodeURIComponent(queue.id)}` : ''}`);
+    // Replace, not push: Back from the player always returns to the screen under it.
+    if (mode === 'full' && !document.hidden) location.replace(`#/watch/${item.id}${queue ? `?list=${encodeURIComponent(queue.id)}` : ''}`);
     else load(item.id, queue && queue.id);
   }
 
@@ -183,6 +186,7 @@ const Watch = (() => {
   function load(newId, list) {
     if (id && video && now() > 0) save(now());
     id = newId; video = null; warmed = false;
+    userPaused = false; // a new video is meant to play
     const token = ++loadToken;
     if (stopRelated) { stopRelated(); stopRelated = null; }
     player.unload();
@@ -206,7 +210,7 @@ const Watch = (() => {
       video = v;
       const hist = (h.items || []).find((x) => x.id === newId);
       let start = 0;
-      if (hist && hist.position > 10 && v.duration > 0 && hist.position < v.duration - 15) start = hist.position;
+      if (hist && hist.type !== 'short' && !v.short && hist.position > 10 && v.duration > 0 && hist.position < v.duration - 15) start = hist.position;
       if (audioMode) {
         // Still in the background (e.g. the Mix moved on): keep going on audio.
         player.load(v, start, { autoplay: false });
@@ -239,7 +243,7 @@ const Watch = (() => {
         type: 'video', id, title: video.title, channel: video.channel.name, channelId: video.channel.id,
         channelAvatar: video.channel.avatar, verified: video.channel.verified,
         thumb: (preview && preview.type === 'video' && preview.thumb) || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-        duration: video.duration, views: video.views, published: video.published, live: video.live, short: false,
+        duration: video.duration, views: video.views, published: video.published, live: video.live, short: false, category: video.category || "",
       },
       position: Math.floor(t || 0),
     }).catch(() => {});
@@ -280,7 +284,7 @@ const Watch = (() => {
     body.querySelector('.act-share').onclick = () => share(v.title, ytUrl(vid));
     downloadButton(vid, v, body.querySelector('.act-dl'));
     const mixBtn = body.querySelector('.act-mix');
-    if (mixBtn) mixBtn.onclick = () => go(`#/watch/${vid}?list=RD${vid}`);
+    if (mixBtn) mixBtn.onclick = () => location.replace(`#/watch/${vid}?list=RD${vid}`);
     renderQueue();
 
     const rel = body.querySelector('.related');
@@ -510,7 +514,7 @@ const Watch = (() => {
       toast(q.shuffle ? 'Shuffle on' : 'Shuffle off');
       renderQueue();
     };
-    slot.querySelector('.q-exit').onclick = () => go(`#/watch/${id}`);
+    slot.querySelector('.q-exit').onclick = () => location.replace(`#/watch/${id}`);
     if (!q.open) return;
     const list = slot.querySelector('.queue-list');
     q.items.forEach((it, i) => {
@@ -569,8 +573,8 @@ const Watch = (() => {
 
   // Notification, lock screen and headset buttons (from the Flutter shell).
   window.astMedia = (action) => {
-    if (action === 'play') { wantPlay = true; media().play().catch(() => {}); }
-    else if (action === 'pause') { wantPlay = false; media().pause(); document.querySelectorAll('video').forEach((v) => v.pause()); }
+    if (action === 'play') { userPaused = false; media().play().catch(() => {}); }
+    else if (action === 'pause') { userPaused = true; media().pause(); document.querySelectorAll('video').forEach((v) => v.pause()); }
     else if (action === 'next') playNext();
     else if (action === 'prev') playPrev();
     else if (action === 'close') close();
@@ -618,7 +622,9 @@ const Watch = (() => {
     place(corner, true);
   });
   tap.addEventListener('pointercancel', () => { drag = null; place(corner, true); });
-  layer.querySelector('.mini-play').onclick = () => { if (player.paused) { wantPlay = true; player.play(); } else player.pause(); };
+  layer.querySelector('.mini-play').onclick = () => {
+    if (isPaused()) { userPaused = false; media().play().catch(() => {}); } else { userPaused = true; media().pause(); }
+  };
   layer.querySelector('.mini-close').onclick = close;
 
   return {

@@ -45,6 +45,8 @@ function shortsScreen(screen, { id }) {
     sl.querySelector('.act-more').onclick = () => menuSheet([
       { icon: 'link', label: 'Copy link', run: () => copy(`https://youtube.com/shorts/${s.id}`) },
       { icon: 'external', label: 'Open on YouTube', run: () => window.open(`https://youtube.com/shorts/${s.id}`, '_blank') },
+      { icon: 'close', label: 'Not interested', run: () => hideShort(sl, { video: { id: s.id } }) },
+      ...(sl._details && sl._details.channel.id ? [{ icon: 'trash', label: `Don't recommend ${sl._details.channel.name}`, run: () => hideShort(sl, { channel: { id: sl._details.channel.id, name: sl._details.channel.name } }) }] : []),
     ]);
     sl.querySelector('.short-tap').onclick = () => {
       const v = sl._video;
@@ -54,6 +56,14 @@ function shortsScreen(screen, { id }) {
     sl._item = s;
     io.observe(sl);
     return sl;
+  }
+
+  // "Not interested": remember it, and move on to the next Short.
+  async function hideShort(sl, body) {
+    try { await post('/api/blocklist', body); } catch (e) { toast(e.message); return; }
+    toast(body.video ? 'Short hidden. We\x27ll show fewer like it.' : `You won't see ${body.channel.name} in recommendations.`);
+    const next = sl.nextElementSibling;
+    if (next) next.scrollIntoView({ behavior: 'smooth' });
   }
 
   function fill(sl, v) {
@@ -77,12 +87,18 @@ function shortsScreen(screen, { id }) {
     video.addEventListener('pause', () => {
       if (current !== sl || !alive) return;
       sl.querySelector('.short-paused').classList.remove('hidden');
-      saveHistory(sl, video.currentTime);
+      saveHistory(sl);
     });
+    // Shorts loop, so "how far" says little: count every second actually watched instead.
+    let lastT = 0;
+    sl._watched = sl._watched || 0;
     video.addEventListener('timeupdate', () => {
+      const t = video.currentTime, d = t - lastT;
+      lastT = t;
+      if (current === sl && !video.paused && d > 0 && d < 2) sl._watched += d;
       if (current !== sl || !video.duration) return;
       sl.querySelector('.short-prog i').style.width = `${(video.currentTime / video.duration) * 100}%`;
-      if (Date.now() - lastSaved > 15000) saveHistory(sl, video.currentTime);
+      if (Date.now() - lastSaved > 15000) saveHistory(sl);
     });
     getDetails(sl.dataset.id).then((v) => {
       if (sl._video !== video || !alive) return;
@@ -118,11 +134,12 @@ function shortsScreen(screen, { id }) {
     if (!v || !sl._details) return;
     v.currentTime = 0;
     v.play().catch(() => sl.querySelector('.short-paused').classList.remove('hidden'));
-    saveHistory(sl, 0);
+    saveHistory(sl);
   }
 
   function activate(sl) {
     if (current === sl) return;
+    if (current && current !== sl) saveHistory(current); // the final watch time of the one we leave
     if (current && current._video) current._video.pause();
     current = sl;
     history.replaceState(null, '', `#/shorts/${sl.dataset.id}`);
@@ -137,10 +154,13 @@ function shortsScreen(screen, { id }) {
     if (sl._details) start(sl);
     if (all.length - at <= 5) loadMore();
     // Keep this one and the next few on the phone, so Shorts still play without internet.
-    if (!isOffline()) post('/api/offline/shorts', { items: all.slice(at, at + 4).map((s) => s._item) }).catch(() => {});
+    // Wi-Fi: the next 10; mobile data: the next 3.
+    if (!isOffline()) post('/api/offline/shorts', { items: all.slice(at, at + 1 + (netMetered ? 3 : 10)).map((s) => s._item) }).catch(() => {});
   }
 
-  function saveHistory(sl, t) {
+  // Reports seconds watched in total (loops included); the server keeps the highest value.
+  function saveHistory(sl) {
+    const t = sl._watched || 0;
     const v = sl._details;
     if (!v) return;
     lastSaved = Date.now();
@@ -148,7 +168,7 @@ function shortsScreen(screen, { id }) {
       video: {
         type: 'short', id: sl.dataset.id, title: v.title, channel: v.channel.name, channelId: v.channel.id,
         channelAvatar: v.channel.avatar, verified: v.channel.verified, thumb: sl._item.thumb,
-        duration: v.duration, views: v.views, published: v.published, live: false, short: true,
+        duration: v.duration, views: v.views, published: v.published, live: false, short: true, category: v.category || "",
       },
       position: Math.floor(t),
     }).catch(() => {});
@@ -165,7 +185,8 @@ function shortsScreen(screen, { id }) {
       const data = await api(isOffline() ? '/api/shorts?offline=1' : `/api/shorts${next ? `?next=${encodeURIComponent(next)}` : ''}`);
       if (!alive) return;
       if (data.offline) {
-        screen.querySelector('.shorts-title').innerHTML = `Shorts <span class="offline-tag">${icon('wifiOff', 14)} Offline · ${data.items.length} saved</span>`;
+        const fresh = data.items.filter((i) => i.fresh).length;
+        screen.querySelector('.shorts-title').innerHTML = `Shorts <span class="offline-tag">${icon('wifiOff', 14)} Offline · ${fresh} new · ${data.items.length - fresh} watched</span>`;
         if (!data.items.length && !feed.children.length) {
           feed.appendChild(el(`<div class="error-card offline-card">${icon('wifiOff', 40)}<p><b>No saved Shorts yet</b><br>Shorts you watch online are saved here to play without internet.</p><a class="pill" href="#/downloads">${icon('download', 18)} Downloads</a></div>`));
         }
@@ -201,7 +222,7 @@ function shortsScreen(screen, { id }) {
   return () => {
     alive = false;
     io.disconnect();
-    if (current && current._video && current._video.currentTime) saveHistory(current, current._video.currentTime);
+    if (current && current._video && current._video.currentTime) saveHistory(current);
     slides().forEach(release);
   };
 }
