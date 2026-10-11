@@ -20,7 +20,11 @@ const post = (path, data) => api(path, { method: 'POST', headers: { 'Content-Typ
 
 // App preferences, kept by the local server (settings.json) so the native side can read them too.
 const settings = { autoplay: true, background: true, quality: 'auto' };
-const settingsReady = api('/api/settings').then((s) => Object.assign(settings, s)).catch(() => {});
+const settingsReady = api('/api/settings').then((s) => {
+  Object.assign(settings, s);
+  // Things drawn before the saved settings arrived (the player's autoplay switch) redraw now.
+  for (const [key, value] of Object.entries(settings)) document.dispatchEvent(new CustomEvent('settings', { detail: { key, value } }));
+}).catch(() => {});
 function saveSetting(key, value) {
   settings[key] = value;
   post('/api/settings', { [key]: value }).catch(() => toast('Could not save that setting'));
@@ -137,6 +141,8 @@ const dot = (...parts) => parts.filter(Boolean).map(esc).join(' <i class="sep">â
 function el(html) {
   const t = document.createElement('template');
   t.innerHTML = html.trim();
+  // Decode images off the scrolling path (fewer dropped frames while flinging through cards).
+  for (const img of t.content.querySelectorAll('img')) img.decoding = 'async';
   return t.content.firstElementChild;
 }
 
@@ -302,32 +308,54 @@ function errorCard(message, retry) {
 function pullToRefresh(scroller, onRefresh) {
   const ind = el(`<div class="ptr">${icon('refresh', 22)}</div>`);
   document.body.appendChild(ind);
-  const ARM = 80;
-  let y0 = null, d = 0, busy = false;
+  // Guards against refreshing by accident when you just meant to scroll back up:
+  const ARM = 140; // finger travel (px) needed to refresh
+  const SLACK = 24; // first bit of travel ignored, so a quick flick never even shows the icon
+  const REST_MS = 600; // the list must have been resting at the top this long before the touch
+  const MIN_PULL_MS = 300; // a quicker gesture is a flick (scrolling back up), never a pull
+  let restedAt = scroller.scrollTop <= 0 ? 0 : null; // when the list last came to rest at the top
+  let x0 = 0, y0 = null, d = 0, t0 = 0, busy = false, decided = false;
   const reset = () => { ind.classList.remove('show', 'armed', 'spin'); ind.style.transform = ''; };
+  scroller.addEventListener('scroll', () => {
+    if (scroller.scrollTop > 0) restedAt = null;
+    else if (restedAt == null) restedAt = performance.now();
+  }, { passive: true });
   scroller.addEventListener('touchstart', (e) => {
-    y0 = scroller.scrollTop <= 0 && !busy && !scroller.classList.contains('hidden') ? e.touches[0].clientY : null;
+    // Arriving at the top with a fling (or still gliding there) doesn't count.
+    const settled = restedAt != null && performance.now() - restedAt >= REST_MS;
+    y0 = scroller.scrollTop <= 0 && settled && !busy && !scroller.classList.contains('hidden') ? e.touches[0].clientY : null;
+    x0 = e.touches[0].clientX;
+    t0 = performance.now();
     d = 0;
+    decided = false;
   }, { passive: true });
   scroller.addEventListener('touchmove', (e) => {
     if (y0 == null) return;
+    const dx = e.touches[0].clientX - x0;
     d = e.touches[0].clientY - y0;
-    if (d <= 0 || scroller.scrollTop > 0) { reset(); return; }
-    const p = Math.min(d, 150);
+    // The first clear movement decides: sideways (e.g. the chips) or upward cancels the pull.
+    if (!decided && (Math.abs(dx) > 10 || Math.abs(d) > 10)) {
+      decided = true;
+      if (Math.abs(dx) > Math.abs(d) || d < 0) { y0 = null; reset(); return; }
+    }
+    if (d <= SLACK || scroller.scrollTop > 0) { reset(); return; }
+    const p = Math.min(d - SLACK, 170);
     ind.classList.add('show');
     ind.classList.toggle('armed', d > ARM);
-    ind.style.transform = `translate(-50%, ${p * 0.55}px) rotate(${p * 2.4}deg)`;
+    ind.style.transform = `translate(-50%, ${p * 0.5}px) rotate(${p * 2.2}deg)`;
   }, { passive: true });
-  scroller.addEventListener('touchend', async () => {
+  const end = async () => {
     if (y0 == null) return;
     y0 = null;
-    if (d <= ARM || busy) { reset(); return; }
+    if (d <= ARM || busy || performance.now() - t0 < MIN_PULL_MS) { reset(); return; }
     busy = true;
     ind.classList.add('spin');
     ind.style.transform = 'translate(-50%, 48px)';
     try { await onRefresh(); } catch (e) { /* the screen shows its own error */ }
     setTimeout(() => { reset(); busy = false; }, 300);
-  });
+  };
+  scroller.addEventListener('touchend', end);
+  scroller.addEventListener('touchcancel', () => { y0 = null; reset(); });
 }
 
 // Resolves when test() is true (checked every 150 ms), or after `ms`.
